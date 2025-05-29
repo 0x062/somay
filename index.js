@@ -1,6 +1,6 @@
 // somnia_master_script.js
 require('dotenv').config(); // Membaca file .env di root project
-
+require('./faucet_service.js');
 const { ethers } = require('ethers');
 const colors = require('colors');
 
@@ -133,6 +133,46 @@ async function getTokenBalance(tokenAddress, walletAddress, signerOrProvider) {
     decimals,
     symbol
   };
+}
+
+// --- BAGIAN BARU: FUNGSI KLAIM FAUCET ---
+async function performFaucetClaim(signer, walletAddress) {
+  console.log(colors.cyan("\n--- Memulai Fase Klaim Faucet ---"));
+  console.log(`🚀 Mengajukan Klaim Faucet Untuk Wallet - [${WALLET_ID}] ${walletAddress}`);
+
+  try {
+    const apiResponse = await claimFaucet(walletAddress, null); // Memanggil fungsi yang diimpor
+    
+    let responseString = "";
+    if (typeof apiResponse === 'string') {
+        responseString = apiResponse;
+    } else if (apiResponse && typeof apiResponse === 'object') {
+        responseString = JSON.stringify(apiResponse);
+    } else if (apiResponse !== undefined && apiResponse !== null) {
+        responseString = String(apiResponse);
+    }
+
+    console.log(`✅ Faucet Berhasil Diklaim untuk Wallet - [${walletAddress}]`);
+    if (responseString) {
+      console.log(`🔗 Respons API: ${responseString}`);
+    }
+
+  } catch (error) {
+    const code = error.code || 'N/A';
+    let errorMessage = 'Detail error tidak tersedia.';
+    if (error.response && error.response.data) { 
+        errorMessage = JSON.stringify(error.response.data);
+    } else if (error.data) { 
+        errorMessage = JSON.stringify(error.data);
+    } else if (error.message) {
+        errorMessage = error.message;
+    } else {
+        try { errorMessage = JSON.stringify(error); } catch (e) { errorMessage = String(error); }
+    }
+    console.log(`⚠️  Permintaan Faucet Gagal dengan kode - [${code}]`.red);
+    console.log(`   Respons API/Error: ${errorMessage}`.red);
+  }
+  console.log(colors.blue("--- Fase Klaim Faucet Selesai ---"));
 }
 
 // --- BAGIAN 5: FUNGSI MINTING ---
@@ -340,6 +380,20 @@ async function main() {
   } catch (e) {
     console.error(` Gagal mendapatkan saldo native: ${e.message}`.red); return; 
   }
+  
+  try {
+    await performFaucetClaim(signer, walletAddress);
+  } catch (error) {
+     console.error(colors.red.bold("\n❌ Error Kritis selama Fase Klaim Faucet:"), error);
+     // Anda bisa memutuskan apakah akan melanjutkan ke minting/swapping jika faucet gagal
+  }
+  
+  // Jeda setelah faucet claim
+  const faucetDelaySeconds = 3 + Math.random()*3; // Jeda 3-6 detik
+  console.log(`\n⏳ Jeda ${Math.round(faucetDelaySeconds)} detik setelah klaim faucet...`.gray);
+  await new Promise(res => setTimeout(res, faucetDelaySeconds * 1000));
+
+  // ... (lanjutkan dengan langkah Fase Minting, Jeda, Fase Swapping seperti sebelumnya) ...
 
   // 1. Jalankan Fase Minting
   let mintingDoneSuccessfully = false;
