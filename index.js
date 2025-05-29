@@ -1,6 +1,6 @@
-// somnia_master_script.js
-require('dotenv').config(); // Membaca file .env di root project
-require('./faucet_service.js');
+require('dotenv').config();
+
+const { claimFaucet } = require('./faucet_service.js'); 
 const { ethers } = require('ethers');
 const colors = require('colors');
 
