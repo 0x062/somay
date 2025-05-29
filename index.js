@@ -1,72 +1,131 @@
-// misal: actions/SomniaSwap/random.js
-require('dotenv').config();
+// somnia_master_script.js
+require('dotenv').config(); // Membaca file .env di root project
 
 const { ethers } = require('ethers');
 const colors = require('colors');
 
-// Impor konfigurasi dan ABI
-// Pastikan path ini benar relatif terhadap lokasi random.js
-const chainConfig = require('./chain.js');
-const { ROUTER_ABI, ERC20_ABI, PONG_CONTRACT, PING_CONTRACT, ROUTER_CONTRACT } = require('./ABI.js');
+// --- BAGIAN 1: KONFIGURASI JARINGAN (Sebelumnya di chain.js) ---
+const CHAIN_CONFIG = {
+  RPC_URL: process.env.NODE_RPC_URL || "https://dream-rpc.somnia.network/", // Ambil dari .env atau default
+  CHAIN_ID: 50312,
+  SYMBOL: "STT",
+  TX_EXPLORER: "https://shannon-explorer.somnia.network/tx/",
+  ADDRESS_EXPLORER: "https://shannon-explorer.somnia.network/address/",
+};
 
-// --- KONFIGURASI WALLET TUNGGAL (diambil dari .env) ---
+// --- BAGIAN 2: ALAMAT KONTRAK & ABI (Sebelumnya di ABI.js) ---
+const CONTRACT_ADDRESSES = {
+  QUOTER: "0x27a1e87aed9949808a7c6db733ad1cd96e365d9e", // Tidak digunakan di skrip ini, tapi ada untuk referensi
+  PONG: "0x7968ac15a72629E05F41B8271e4e7292E0cC9f90",
+  PING: "0xBeCd9B5F373877881D91cBdBaF013D97eB532154",
+  ROUTER: "0x6AAC14f090A35EeA150705f72D90E4CDC4a49b2C",
+};
+
+// ABI Utama (berisi fungsi mint, exactInputSingle, dll.)
+const ALL_CONTRACT_FUNCTIONS_ABI = [
+  // exactInputSingle (digunakan untuk swapping)
+  {
+    "inputs": [
+      {
+        "components": [
+          { "internalType": "address", "name": "tokenIn", "type": "address" },
+          { "internalType": "address", "name": "tokenOut", "type": "address" },
+          { "internalType": "uint24", "name": "fee", "type": "uint24" },
+          { "internalType": "address", "name": "recipient", "type": "address" },
+          // Tidak ada 'deadline' di sini sesuai ABI Anda
+          { "internalType": "uint256", "name": "amountIn", "type": "uint256" },
+          { "internalType": "uint256", "name": "amountOutMinimum", "type": "uint256" },
+          { "internalType": "uint160", "name": "sqrtPriceLimitX96", "type": "uint160" }
+        ],
+        "internalType": "struct IExactInputSingleParams", // Nama struct dari ABI Anda
+        "name": "params",
+        "type": "tuple"
+      }
+    ],
+    "name": "exactInputSingle",
+    "outputs": [ { "internalType": "uint256", "name": "amountOut", "type": "uint256" } ],
+    "stateMutability": "payable",
+    "type": "function"
+  },
+  // mint(address to, uint256 amount) (digunakan untuk minting PONG & PING)
+  {
+    "inputs": [
+      { "internalType": "address", "name": "to", "type": "address" },
+      { "internalType": "uint256", "name": "amount", "type": "uint256" }
+    ],
+    "name": "mint",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  }
+  // Anda bisa menambahkan ABI fungsi lain dari ROUTER jika diperlukan di sini
+];
+
+// ABI Lokal untuk fungsi ERC20 standar yang sering digunakan
+const LOCAL_ERC20_ABI = [
+  "function name() view returns (string)",
+  "function symbol() view returns (string)",
+  "function decimals() view returns (uint8)",
+  "function balanceOf(address account) view returns (uint256)",
+  "function allowance(address owner, address spender) view returns (uint256)",
+  "function approve(address spender, uint256 amount) external returns (bool)"
+];
+
+// --- BAGIAN 3: KONFIGURASI SKRIP UTAMA (dari .env atau default) ---
 const SINGLE_WALLET_PRIVATE_KEY = process.env.NODE_PRIVATE_KEY;
-const WALLET_ID = 'AutoSwapWallet-01'; // Nama wallet untuk logging
+const WALLET_ID = 'SomniaMasterWallet';
 
-// --- KONFIGURASI SWAP ---
-const MIN_SWAP_PERCENTAGE = 0.05; // 5% dari saldo token sumber
-const MAX_SWAP_PERCENTAGE = 0.15; // 15% dari saldo token sumber
-const SWAP_AMOUNT_DECIMAL_PRECISION = 6; // Jumlah desimal untuk toFixed() sebelum parseUnits
-const NUM_SWAPS_PER_RUN = parseInt(process.env.NODE_NUM_SWAPS_PER_RUN || String(Math.floor(Math.random() * (10 - 5 + 1)) + 5)); // Jumlah swap (5-10) per eksekusi skrip
-const DELAY_BETWEEN_SWAPS_BASE_SECONDS = parseInt(process.env.NODE_DELAY_SWAPS_BASE_SECONDS || '10'); // Jeda dasar
-const DELAY_BETWEEN_SWAPS_RANDOM_SECONDS = parseInt(process.env.NODE_DELAY_SWAPS_RANDOM_SECONDS || '10'); // Jeda acak tambahan
-const SLIPPAGE_PERCENTAGE = parseFloat(process.env.NODE_SLIPPAGE_PERCENTAGE || '0.5'); // Slippage 0.5%
+const MINT_AMOUNT_TOKENS_STR = process.env.NODE_MINT_AMOUNT_TOKENS || "1000"; // Jumlah "utuh" per token
+
+const MIN_SWAP_PERCENTAGE = parseFloat(process.env.NODE_MIN_SWAP_PERCENTAGE || '0.05');
+const MAX_SWAP_PERCENTAGE = parseFloat(process.env.NODE_MAX_SWAP_PERCENTAGE || '0.15');
+const SWAP_AMOUNT_DECIMAL_PRECISION = 6;
+const NUM_SWAPS_PER_RUN = parseInt(process.env.NODE_NUM_SWAPS_PER_RUN || String(Math.floor(Math.random() * (10 - 5 + 1)) + 5));
+const DELAY_BETWEEN_ACTIONS_BASE_SECONDS = parseInt(process.env.NODE_DELAY_ACTIONS_BASE_SECONDS || '10');
+const DELAY_BETWEEN_ACTIONS_RANDOM_SECONDS = parseInt(process.env.NODE_DELAY_ACTIONS_RANDOM_SECONDS || '5');
+const SLIPPAGE_PERCENTAGE = parseFloat(process.env.NODE_SLIPPAGE_PERCENTAGE || '0.5');
 
 // Validasi konfigurasi penting
 if (!SINGLE_WALLET_PRIVATE_KEY || SINGLE_WALLET_PRIVATE_KEY === 'MASUKKAN_PRIVATE_KEY_ANDA_DI_SINI') {
   console.error('🔴 FATAL: NODE_PRIVATE_KEY tidak ditemukan atau belum diatur di file .env'.red);
   process.exit(1);
 }
-if (!chainConfig.RPC_URL) {
-  console.error('🔴 FATAL: NODE_RPC_URL tidak ditemukan atau belum diatur di file .env (melalui chain.js)'.red);
+if (!CHAIN_CONFIG.RPC_URL || !CHAIN_CONFIG.RPC_URL.startsWith("http")) {
+  console.error('🔴 FATAL: RPC_URL tidak valid. Pastikan diatur di .env atau di skrip.'.red);
   process.exit(1);
 }
-if (!PONG_CONTRACT || !PING_CONTRACT || !ROUTER_CONTRACT || PONG_CONTRACT.includes("0xPONG") || PING_CONTRACT.includes("0xPING") || ROUTER_CONTRACT.includes("0xROUTER")) {
-  console.warn('🟡 PERINGATAN: Satu atau lebih alamat kontrak (PONG, PING, ROUTER) tampaknya menggunakan placeholder. Pastikan sudah benar di ABI.js atau .env.'.yellow);
-}
 
+const provider = new ethers.providers.JsonRpcProvider(CHAIN_CONFIG.RPC_URL, CHAIN_CONFIG.CHAIN_ID);
+const tokensToManage = []; // Akan diisi [ { address, symbol, decimals }, ... ]
 
-const provider = new ethers.providers.JsonRpcProvider(chainConfig.RPC_URL, chainConfig.CHAIN_ID || undefined); // CHAIN_ID opsional jika RPC mendukung deteksi otomatis
+// Cache
+const tokenInfoCache = {};
 
-const tokens = [
-  { name: 'PONG', address: PONG_CONTRACT }, // Sebaiknya nama diambil dari tokenContract.symbol()
-  { name: 'PING', address: PING_CONTRACT }  // Sebaiknya nama diambil dari tokenContract.symbol()
-];
-
-// Cache untuk desimal token
-const tokenDecimalsCache = {};
-const tokenSymbolCache = {};
-
+// --- BAGIAN 4: FUNGSI HELPER ---
 async function getTokenInfo(tokenAddress, signerOrProvider) {
-  if (!tokenDecimalsCache[tokenAddress] || !tokenSymbolCache[tokenAddress]) {
-    const tokenContract = new ethers.Contract(tokenAddress, ERC20_ABI, signerOrProvider);
-    try {
-        tokenDecimalsCache[tokenAddress] = await tokenContract.decimals();
-        tokenSymbolCache[tokenAddress] = await tokenContract.symbol();
-    } catch (e) {
-        console.error(` Gagal mendapatkan info (decimals/symbol) untuk token ${tokenAddress}: ${e.message}`.red);
-        // Fallback ke nama dari array `tokens` jika gagal
-        const tokenConfig = tokens.find(t => t.address.toLowerCase() === tokenAddress.toLowerCase());
-        tokenSymbolCache[tokenAddress] = tokenConfig ? tokenConfig.name : 'UNKNOWN_TOKEN';
-        tokenDecimalsCache[tokenAddress] = 18; // Default ke 18 jika gagal, ini asumsi!
-    }
+  const addressLower = tokenAddress.toLowerCase();
+  if (tokenInfoCache[addressLower]) {
+    return tokenInfoCache[addressLower];
   }
-  return { decimals: tokenDecimalsCache[tokenAddress], symbol: tokenSymbolCache[tokenAddress] };
+  const tokenContract = new ethers.Contract(tokenAddress, LOCAL_ERC20_ABI, signerOrProvider);
+  let decimals = 18; // Default
+  let symbol = 'UNKNOWN';
+  try {
+    decimals = await tokenContract.decimals();
+    symbol = await tokenContract.symbol();
+  } catch (e) {
+    console.warn(` Gagal mendapatkan info (decimals/symbol) untuk token ${tokenAddress}. Error: ${e.message}`.yellow);
+    if (addressLower === CONTRACT_ADDRESSES.PONG.toLowerCase()) symbol = 'PONG';
+    else if (addressLower === CONTRACT_ADDRESSES.PING.toLowerCase()) symbol = 'PING';
+  }
+  const info = { decimals, symbol, address: tokenAddress };
+  tokenInfoCache[addressLower] = info;
+  return info;
 }
 
 async function getTokenBalance(tokenAddress, walletAddress, signerOrProvider) {
   const { decimals, symbol } = await getTokenInfo(tokenAddress, signerOrProvider);
-  const tokenContract = new ethers.Contract(tokenAddress, ERC20_ABI, signerOrProvider);
+  const tokenContract = new ethers.Contract(tokenAddress, LOCAL_ERC20_ABI, signerOrProvider);
   const rawBalance = await tokenContract.balanceOf(walletAddress);
   return {
     formatted: Number(ethers.utils.formatUnits(rawBalance, decimals)),
@@ -76,228 +135,250 @@ async function getTokenBalance(tokenAddress, walletAddress, signerOrProvider) {
   };
 }
 
-async function checkAndApproveToken(tokenAddress, tokenSymbol, signer, amountNeededBN) {
-  const tokenContract = new ethers.Contract(tokenAddress, ERC20_ABI, signer);
+// --- BAGIAN 5: FUNGSI MINTING ---
+async function performMinting(signer, walletAddress) {
+  console.log(colors.cyan("\n--- Memulai Fase Minting Token ---"));
+  const mintAbiFragment = ALL_CONTRACT_FUNCTIONS_ABI.find(item => item.name === 'mint' && item.type === 'function' && item.inputs.length === 2);
+  if (!mintAbiFragment) {
+    console.error(" Fungsi 'mint(address, uint256)' tidak ditemukan dalam ALL_CONTRACT_FUNCTIONS_ABI.".red);
+    return false;
+  }
+
+  let allMintsSuccessful = true;
+  for (const tokenConfig of tokensToManage) {
+    try {
+      console.log(`\nMencoba mint [${tokenConfig.symbol}] ke ${walletAddress}...`.blue);
+      const MINT_AMOUNT_BN = ethers.utils.parseUnits(MINT_AMOUNT_TOKENS_STR, tokenConfig.decimals);
+      const contract = new ethers.Contract(tokenConfig.address, [mintAbiFragment], signer);
+
+      const block = await provider.getBlock('latest');
+      if (!block || !block.baseFeePerGas) {
+        console.error(' Tidak dapat mengambil baseFeePerGas dari blok terbaru.'.red);
+        allMintsSuccessful = false; continue;
+      }
+      const gasPriceSuggestion = block.baseFeePerGas.mul(120).div(100); // base + 20%
+      const txOptions = {
+        maxFeePerGas: gasPriceSuggestion,
+        maxPriorityFeePerGas: ethers.utils.parseUnits("1", "gwei"), // Tip 1 Gwei
+      };
+      
+      try {
+        const estimatedGas = await contract.estimateGas.mint(walletAddress, MINT_AMOUNT_BN); // Hapus txOptions dari estimateGas jika menyebabkan error
+        txOptions.gasLimit = estimatedGas.mul(120).div(100);
+        console.log(` Estimasi gas untuk mint ${tokenConfig.symbol}: ${txOptions.gasLimit.toString()}`);
+      } catch (estError) {
+        console.warn(` Gagal estimasi gas mint ${tokenConfig.symbol}, menggunakan default 200000. Error: ${estError.message}`.yellow);
+        txOptions.gasLimit = ethers.utils.hexlify(200000);
+      }
+
+      console.log(`⚙️  Tx Mint untuk [${tokenConfig.symbol}] (${MINT_AMOUNT_TOKENS_STR} ${tokenConfig.symbol}) ...`);
+      const tx = await contract.mint(walletAddress, MINT_AMOUNT_BN, txOptions);
+      console.log(`🔗 Tx Mint Terkirim! ${CHAIN_CONFIG.TX_EXPLORER}${tx.hash}`.magenta);
+      const receipt = await tx.wait(1);
+      console.log(`✅ Tx Mint [${tokenConfig.symbol}] Terkonfirmasi! Blok: ${receipt.blockNumber}`.green);
+    } catch (err) {
+      console.error(`❌ Gagal mint [${tokenConfig.symbol}]: ${err.reason || err.message || err}`.red);
+      allMintsSuccessful = false;
+    }
+    const delay = (DELAY_BETWEEN_ACTIONS_BASE_SECONDS / 2 + Math.random() * DELAY_BETWEEN_ACTIONS_RANDOM_SECONDS / 2) * 1000;
+    console.log(`⏳ Jeda ${Math.round(delay/1000)} detik...`);
+    await new Promise(resolve => setTimeout(resolve, delay));
+  }
+  return allMintsSuccessful;
+}
+
+// --- BAGIAN 6: FUNGSI SWAPPING ---
+async function checkAndApproveToken(tokenAddress, tokenSymbol, tokenDecimals, signer, amountNeededBN) {
+  const tokenContract = new ethers.Contract(tokenAddress, LOCAL_ERC20_ABI, signer);
   const owner = await signer.getAddress();
-  const allowance = await tokenContract.allowance(owner, ROUTER_CONTRACT);
+  const allowance = await tokenContract.allowance(owner, CONTRACT_ADDRESSES.ROUTER);
 
   if (allowance.gte(amountNeededBN)) {
-    console.log(`👍 [${tokenSymbol}] sudah cukup di-approve untuk Router.`.cyan);
+    console.log(`👍 [${tokenSymbol}] sudah cukup di-approve untuk Router.`);
     return true;
   }
-  console.log(`🔥 Meng-approve [${tokenSymbol}] sejumlah ${ethers.utils.formatUnits(amountNeededBN, (await getTokenInfo(tokenAddress,signer)).decimals )} agar bisa digunakan oleh Router...`.yellow);
+  console.log(`🔥 Meng-approve [${tokenSymbol}] (${ethers.utils.formatUnits(amountNeededBN, tokenDecimals)})...`.yellow);
   try {
-    // Approve jumlah yang sedikit lebih besar atau MaxUint256
-    // Menggunakan MaxUint256 lebih umum untuk DEX, tapi approve jumlah spesifik lebih aman jika sering ganti router
     const approveAmount = ethers.constants.MaxUint256;
-    // const approveAmount = amountNeededBN.mul(2); // atau amountNeededBN.add(ethers.utils.parseUnits("1", tokenDecimals));
-
-    const tx = await tokenContract.approve(ROUTER_CONTRACT, approveAmount, {
-        // gasPrice: ethers.utils.parseUnits('5', 'gwei'), // Contoh pengaturan gas manual
-        // gasLimit: 100000 // Contoh gas limit manual
-    });
-    console.log(`⏳ Menunggu konfirmasi approval [${tokenSymbol}]... Tx: ${chainConfig.TX_EXPLORER}${tx.hash}`.gray);
-    await tx.wait(1); // Tunggu 1 konfirmasi
-    console.log(`✅ [${tokenSymbol}] berhasil di-approve untuk Router.`.green);
-    await new Promise(res => setTimeout(res, 2000 + Math.random() * 1000)); // Jeda singkat setelah approval
+    const tx = await tokenContract.approve(CONTRACT_ADDRESSES.ROUTER, approveAmount);
+    console.log(`⏳ Menunggu approval [${tokenSymbol}]... Tx: ${CHAIN_CONFIG.TX_EXPLORER}${tx.hash}`.gray);
+    await tx.wait(1);
+    console.log(`✅ [${tokenSymbol}] berhasil di-approve.`);
+    await new Promise(res => setTimeout(res, 2000 + Math.random() * 1000));
     return true;
   } catch (error) {
     console.error(`❌ Gagal approve [${tokenSymbol}]: ${error.message}`.red);
-    if (error.transactionHash) {
-        console.error(`   Link approval gagal: ${chainConfig.TX_EXPLORER}${error.transactionHash}`.red)
-    }
-    return false; // Kembalikan false jika approval gagal
+    return false;
   }
 }
 
-async function performContinuousSwaps() {
-  const signer = new ethers.Wallet(SINGLE_WALLET_PRIVATE_KEY, provider);
-  const walletAddress = await signer.getAddress();
-  console.log(`\n🚀 Memulai proses swap untuk Wallet [${WALLET_ID}] - ${walletAddress}\n`.green);
-
-  try {
-    const nativeBalanceBN = await provider.getBalance(walletAddress);
-    if (nativeBalanceBN.lt(ethers.utils.parseEther("0.001"))) { // Periksa saldo native minimal (contoh 0.001)
-      console.warn(`🟡 PERINGATAN: Saldo mata uang native (${chainConfig.NATIVE_CURRENCY_SYMBOL}) rendah: ${ethers.utils.formatEther(nativeBalanceBN)}. Mungkin tidak cukup untuk biaya gas.`.yellow);
-    } else {
-      console.log(`💰 Saldo Native: ${ethers.utils.formatEther(nativeBalanceBN)} ${chainConfig.NATIVE_CURRENCY_SYMBOL}`.cyan);
-    }
-  } catch (e) {
-    console.error(` Gagal mendapatkan saldo native: ${e.message}`.red);
-    return; // Keluar jika tidak bisa cek saldo native
-  }
-
-
-  // Pre-fetch info untuk kedua token
-  const tokenInfo0 = await getTokenInfo(tokens[0].address, signer);
-  const tokenInfo1 = await getTokenInfo(tokens[1].address, signer);
-  tokens[0].name = tokenInfo0.symbol; // Update nama token dari kontrak
-  tokens[1].name = tokenInfo1.symbol;
-
-  let initialBalanceToken0 = (await getTokenBalance(tokens[0].address, walletAddress, signer)).formatted;
-  let initialBalanceToken1 = (await getTokenBalance(tokens[1].address, walletAddress, signer)).formatted;
-
-  if (initialBalanceToken0 === 0 && initialBalanceToken1 === 0) {
-    console.log(`⚠️ Wallet [${WALLET_ID}] tidak memiliki saldo ${tokens[0].name} atau ${tokens[1].name} untuk diswap.`.red);
-    return;
-  }
-  console.log(`Saldo Awal - ${tokens[0].name}: ${initialBalanceToken0.toFixed(SWAP_AMOUNT_DECIMAL_PRECISION)}, ${tokens[1].name}: ${initialBalanceToken1.toFixed(SWAP_AMOUNT_DECIMAL_PRECISION)}`.blue);
-  console.log(`💼 Akan melakukan ${NUM_SWAPS_PER_RUN} swap pada sesi ini dengan slippage ${SLIPPAGE_PERCENTAGE}%.`.blue);
+async function performSwapping(signer, walletAddress) {
+  console.log(colors.cyan("\n--- Memulai Fase Swapping Token ---"));
+  const routerContract = new ethers.Contract(CONTRACT_ADDRESSES.ROUTER, ALL_CONTRACT_FUNCTIONS_ABI, signer);
 
   for (let i = 1; i <= NUM_SWAPS_PER_RUN; i++) {
     console.log(`\n🔄 Swap ke-${i} dari ${NUM_SWAPS_PER_RUN}`.yellow);
 
-    const currentBalToken0 = (await getTokenBalance(tokens[0].address, walletAddress, signer)).formatted;
-    const currentBalToken1 = (await getTokenBalance(tokens[1].address, walletAddress, signer)).formatted;
-
-    // Alternasi arah swap: Prioritaskan jual token yang saldonya lebih banyak (dalam unit, bukan nilai USD)
-    // Ini adalah heuristik sederhana, bisa disesuaikan
-    const swapDirection = (currentBalToken0 > currentBalToken1 && currentBalToken0 > 0) ? 0 : (currentBalToken1 > 0 ? 1 : -1) ;
+    const balToken0 = await getTokenBalance(tokensToManage[0].address, walletAddress, signer);
+    const balToken1 = await getTokenBalance(tokensToManage[1].address, walletAddress, signer);
+    
+    const swapDirection = (balToken0.formatted > balToken1.formatted && balToken0.formatted > 0.00001) ? 0 : (balToken1.formatted > 0.00001 ? 1 : -1);
 
     if (swapDirection === -1) {
-        console.log(`⚠️ Saldo kedua token (${tokens[0].name} dan ${tokens[1].name}) adalah nol atau sangat rendah. Menghentikan swap.`.red);
+        console.log(`⚠️ Saldo kedua token (${tokensToManage[0].symbol} & ${tokensToManage[1].symbol}) terlalu rendah. Fase swap berhenti.`.red);
         return;
     }
     
-    const tokenA = tokens[swapDirection]; // Token yang akan dijual
-    const tokenB = tokens[swapDirection === 0 ? 1 : 0]; // Token yang akan dibeli
-    const balanceA = swapDirection === 0 ? currentBalToken0 : currentBalToken1;
+    const tokenA_config = tokensToManage[swapDirection];
+    const tokenB_config = tokensToManage[swapDirection === 0 ? 1 : 0];
+    const balanceA_formatted = swapDirection === 0 ? balToken0.formatted : balToken1.formatted;
 
-    console.log(`Saldo ${tokenA.name} saat ini: ${balanceA.toFixed(SWAP_AMOUNT_DECIMAL_PRECISION)}`.cyan);
+    console.log(`Saldo ${tokenA_config.symbol}: ${balanceA_formatted.toFixed(SWAP_AMOUNT_DECIMAL_PRECISION)}`);
 
-    if (balanceA === 0) {
-      console.log(`⚠️ Tidak ada saldo ${tokenA.name} untuk diswap. Iterasi ini dilewati.`.yellow);
-      await new Promise(res => setTimeout(res, 1000));
-      continue;
+    if (balanceA_formatted <= 0.000001) {
+      console.log(`⚠️ Saldo ${tokenA_config.symbol} tidak signifikan. Dilewati.`.yellow);
+      await new Promise(res => setTimeout(res, 1000)); continue;
     }
 
     const percentageToSwap = (Math.random() * (MAX_SWAP_PERCENTAGE - MIN_SWAP_PERCENTAGE)) + MIN_SWAP_PERCENTAGE;
-    let amountToSwapNum = Number((balanceA * percentageToSwap).toFixed(SWAP_AMOUNT_DECIMAL_PRECISION));
+    let amountToSwapNum = Number((balanceA_formatted * percentageToSwap).toFixed(SWAP_AMOUNT_DECIMAL_PRECISION));
 
     if (amountToSwapNum <= 0) {
-      console.log(`⚠️ Jumlah ${tokenA.name} yang akan diswap terlalu kecil atau nol (${amountToSwapNum}). Melewati swap ini.`.yellow);
-      await new Promise(res => setTimeout(res, 1000));
-      continue;
+      console.log(`⚠️ Jumlah swap ${tokenA_config.symbol} terlalu kecil (${amountToSwapNum}). Dilewati.`.yellow);
+      await new Promise(res => setTimeout(res, 1000)); continue;
     }
     
-    const decimalsA = (await getTokenInfo(tokenA.address, signer)).decimals;
-    const amountInBN = ethers.utils.parseUnits(amountToSwapNum.toString(), decimalsA);
+    const amountInBN = ethers.utils.parseUnits(amountToSwapNum.toString(), tokenA_config.decimals);
 
     if (amountInBN.isZero()) {
-        console.log(`⚠️ Jumlah ${amountToSwapNum} ${tokenA.name} menghasilkan BigNumber nol setelah parseUnits (terlalu kecil). Melewati.`.yellow);
-        await new Promise(res => setTimeout(res, 1000));
-        continue;
+        console.log(`⚠️ Jumlah swap ${tokenA_config.symbol} jadi nol (terlalu kecil). Dilewati.`.yellow);
+        await new Promise(res => setTimeout(res, 1000)); continue;
     }
     
-    console.log(`✨ Akan menukar: ${amountToSwapNum.toFixed(SWAP_AMOUNT_DECIMAL_PRECISION)} ${tokenA.name} menjadi ${tokenB.name}`.magenta);
+    console.log(`✨ Akan tukar: ${amountToSwapNum.toFixed(SWAP_AMOUNT_DECIMAL_PRECISION)} ${tokenA_config.symbol} -> ${tokenB_config.symbol}`.magenta);
 
     try {
-      const approved = await checkAndApproveToken(tokenA.address, tokenA.name, signer, amountInBN);
+      const approved = await checkAndApproveToken(tokenA_config.address, tokenA_config.symbol, tokenA_config.decimals, signer, amountInBN);
       if (!approved) {
-          console.log(` Gagal melakukan approval untuk ${tokenA.name}, swap dibatalkan untuk iterasi ini.`.red);
-          await new Promise(res => setTimeout(res, (DELAY_BETWEEN_SWAPS_BASE_SECONDS + Math.random() * DELAY_BETWEEN_SWAPS_RANDOM_SECONDS) * 1000));
-          continue;
+          console.log(` Approval ${tokenA_config.symbol} gagal, swap dibatalkan.`.red);
+          const delay = (DELAY_BETWEEN_ACTIONS_BASE_SECONDS + Math.random() * DELAY_BETWEEN_ACTIONS_RANDOM_SECONDS) * 1000;
+          await new Promise(res => setTimeout(res, delay)); continue;
       }
-
-      const routerContract = new ethers.Contract(ROUTER_CONTRACT, ROUTER_ABI, signer);
       
-      // Hitung deadline (misalnya 10 menit dari sekarang)
-      const deadline = Math.floor(Date.now() / 1000) + (10 * 60); 
-
-      const swapParamsBase = {
-        tokenIn: tokenA.address,
-        tokenOut: tokenB.address,
-        fee: 500, // Fee tier Uniswap V3, sesuaikan jika perlu. Untuk DEX lain mungkin tidak ada.
+      const swapParams = { // Perhatikan: tidak ada 'deadline'
+        tokenIn: tokenA_config.address,
+        tokenOut: tokenB_config.address,
+        fee: 500, // Sesuaikan fee tier (untuk Uniswap V3 style)
         recipient: walletAddress,
-        deadline: deadline,
         amountIn: amountInBN,
-        amountOutMinimum: ethers.BigNumber.from(0), // Akan diisi setelah simulasi
-        sqrtPriceLimitX96: 0  // Biasanya 0 untuk tidak ada batasan harga (Uniswap V3)
+        amountOutMinimum: ethers.BigNumber.from(0),
+        sqrtPriceLimitX96: 0
       };
 
       let expectedAmountOutBN;
       try {
-        console.log(`📡 Mensimulasikan swap...`.gray);
-        expectedAmountOutBN = await routerContract.callStatic.exactInputSingle(swapParamsBase
-            // , { from: walletAddress } // Beberapa node/RPC mungkin butuh 'from' untuk callStatic
-        );
-        const decimalsB = (await getTokenInfo(tokenB.address, signer)).decimals;
-        const expectedOutFormatted = ethers.utils.formatUnits(expectedAmountOutBN, decimalsB);
-        console.log(`💡 Simulasi Sukses: Akan mendapatkan ~${parseFloat(expectedOutFormatted).toFixed(SWAP_AMOUNT_DECIMAL_PRECISION)} ${tokenB.name}`.green);
+        console.log(`📡 Mensimulasikan swap...`);
+        expectedAmountOutBN = await routerContract.callStatic.exactInputSingle(swapParams);
+        const expectedOutFormatted = ethers.utils.formatUnits(expectedAmountOutBN, tokenB_config.decimals);
+        console.log(`💡 Simulasi: Dapat ~${parseFloat(expectedOutFormatted).toFixed(SWAP_AMOUNT_DECIMAL_PRECISION)} ${tokenB_config.symbol}`.green);
 
-        // Hitung amountOutMinimum berdasarkan slippage
-        const slippageFactor = ethers.BigNumber.from(Math.floor(SLIPPAGE_PERCENTAGE * 100)); // misal 0.5% -> 50
-        const हंड्रेड_PERCENT_FACTOR = ethers.BigNumber.from(10000); // 100.00%
-        swapParamsBase.amountOutMinimum = expectedAmountOutBN.mul(हंड्रेड_PERCENT_FACTOR.sub(slippageFactor)).div(हंड्रेड_PERCENT_FACTOR);
-        console.log(`   Dengan slippage ${SLIPPAGE_PERCENTAGE}%, amountOutMinimum: ${ethers.utils.formatUnits(swapParamsBase.amountOutMinimum, decimalsB)} ${tokenB.name}`.blue);
+        const slippageFactor = ethers.BigNumber.from(Math.floor(SLIPPAGE_PERCENTAGE * 100));
+        const HUNDRED_PERCENT_FACTOR = ethers.BigNumber.from(10000);
+        swapParams.amountOutMinimum = expectedAmountOutBN.mul(HUNDRED_PERCENT_FACTOR.sub(slippageFactor)).div(HUNDRED_PERCENT_FACTOR);
+        console.log(`   Slippage ${SLIPPAGE_PERCENTAGE}%, min out: ${ethers.utils.formatUnits(swapParams.amountOutMinimum, tokenB_config.decimals)} ${tokenB_config.symbol}`.blue);
 
       } catch (simError) {
-        console.error(`❌ Gagal simulasi swap (${tokenA.name} -> ${tokenB.name}):`.red, simError.reason || simError.message || simError);
-        if (simError.code === 'CALL_EXCEPTION' || (simError.error?.message?.includes("failed")) || (simError.data?.message?.includes("failed")) || (simError.message?.includes("execution reverted")) ) {
-            console.log(`    Simulasi mengindikasikan swap kemungkinan besar akan gagal. Melewati eksekusi swap aktual.`.yellow);
-        } else {
-            console.log(`    Gagal simulasi dengan alasan tidak terduga, namun tetap mencoba eksekusi (hati-hati).`.yellow);
-            // Jika tidak yakin, lebih baik tidak melanjutkan:
-            // await new Promise(res => setTimeout(res, (DELAY_BETWEEN_SWAPS_BASE_SECONDS + Math.random() * DELAY_BETWEEN_SWAPS_RANDOM_SECONDS) * 1000));
-            // continue;
-        }
-        // Jika simulasi gagal, amountOutMinimum tetap 0 (atau nilai default), ini berisiko.
-        // Pertimbangkan untuk tidak melanjutkan jika simulasi gagal.
-        // Untuk contoh ini, kita coba lanjutkan dengan amountOutMinimum yang mungkin masih 0 jika simulasi error parah.
-        // Idealnya: jika simulasi gagal, jangan lanjutkan atau gunakan amountOutMinimum yang sangat konservatif.
-         if(!expectedAmountOutBN) { // Jika expectedAmountOutBN tidak berhasil didapat
-            console.log(`    Karena simulasi gagal mendapatkan expectedAmountOut, swap dibatalkan untuk keamanan.`.red);
-            await new Promise(res => setTimeout(res, (DELAY_BETWEEN_SWAPS_BASE_SECONDS + Math.random() * DELAY_BETWEEN_SWAPS_RANDOM_SECONDS) * 1000));
-            continue;
+        console.error(`❌ Gagal simulasi swap (${tokenA_config.symbol} -> ${tokenB_config.symbol}): ${simError.reason || simError.message || simError}`.red);
+         if(!expectedAmountOutBN) {
+            console.log(`    Simulasi gagal dapat expectedAmountOut, swap dibatalkan.`.red);
+            const delay = (DELAY_BETWEEN_ACTIONS_BASE_SECONDS + Math.random() * DELAY_BETWEEN_ACTIONS_RANDOM_SECONDS) * 1000;
+            await new Promise(res => setTimeout(res, delay)); continue;
          }
       }
       
-      console.log(`🚀 Mengeksekusi Swap: ${amountToSwapNum.toFixed(SWAP_AMOUNT_DECIMAL_PRECISION)} ${tokenA.name} -> ${tokenB.name}...`.yellow);
-      const tx = await routerContract.exactInputSingle(swapParamsBase, {
-        // gasPrice: await provider.getGasPrice(), // atau atur manual
-        // gasLimit: ethers.utils.hexlify(300000) // estimasi atau atur manual
-      });
-      console.log(`🔗 Transaksi Swap Terkirim! Hash: ${chainConfig.TX_EXPLORER}${tx.hash}`.magenta);
-      const receipt = await tx.wait(1); // Tunggu 1 konfirmasi
-      console.log(`✅ Transaksi Terkonfirmasi! Blok: ${receipt.blockNumber}. Gas terpakai: ${receipt.gasUsed.toString()}`.green);
+      console.log(`🚀 Mengeksekusi Swap...`);
+      const tx = await routerContract.exactInputSingle(swapParams);
+      console.log(`🔗 Tx Swap Terkirim! ${CHAIN_CONFIG.TX_EXPLORER}${tx.hash}`.magenta);
+      const receipt = await tx.wait(1);
+      console.log(`✅ Tx Swap Terkonfirmasi! Blok: ${receipt.blockNumber}, Gas: ${receipt.gasUsed.toString()}`.green);
       
-      const postSwapA = (await getTokenBalance(tokenA.address, walletAddress, signer)).formatted;
-      const postSwapB = (await getTokenBalance(tokenB.address, walletAddress, signer)).formatted;
-      console.log(`⚡ Saldo Setelah Swap: ${tokenA.name}: ${postSwapA.toFixed(SWAP_AMOUNT_DECIMAL_PRECISION)}, ${tokenB.name}: ${postSwapB.toFixed(SWAP_AMOUNT_DECIMAL_PRECISION)}`.cyan);
+      const postSwapA = await getTokenBalance(tokenA_config.address, walletAddress, signer);
+      const postSwapB = await getTokenBalance(tokenB_config.address, walletAddress, signer);
+      console.log(`⚡ Saldo Setelah Swap: ${tokenA_config.symbol}: ${postSwapA.formatted.toFixed(SWAP_AMOUNT_DECIMAL_PRECISION)}, ${tokenB_config.symbol}: ${postSwapB.formatted.toFixed(SWAP_AMOUNT_DECIMAL_PRECISION)}`);
 
     } catch (error) {
-      console.error(`❌ Gagal total pada proses swap (${tokenA.name} -> ${tokenB.name}):`.red);
-      if (error.reason) console.error(`   Reason: ${error.reason}`.red);
-      if (error.code) console.error(`   Code: ${error.code}`.red);
-      if (error.transactionHash) {
-        console.error(`   Link transaksi gagal: ${chainConfig.TX_EXPLORER}${error.transactionHash}`.red);
-      } else if (error.message) {
-        console.error(`   Message: ${error.message}`.red);
-      } else {
-        console.error("   Error object:", error)
-      }
+      console.error(`❌ Gagal total proses swap (${tokenA_config.symbol} -> ${tokenB_config.symbol}): ${error.reason || error.message || error}`.red);
     }
     
-    const actualDelay = (DELAY_BETWEEN_SWAPS_BASE_SECONDS + Math.random() * DELAY_BETWEEN_SWAPS_RANDOM_SECONDS) * 1000;
-    console.log(`⏳ Menunggu ${Math.round(actualDelay/1000)} detik sebelum tindakan berikutnya...`);
-    await new Promise(res => setTimeout(res, actualDelay));
+    const delay = (DELAY_BETWEEN_ACTIONS_BASE_SECONDS + Math.random() * DELAY_BETWEEN_ACTIONS_RANDOM_SECONDS) * 1000;
+    console.log(`⏳ Jeda ${Math.round(delay/1000)} detik...`);
+    await new Promise(res => setTimeout(res, delay));
   }
 }
 
+// --- BAGIAN 7: FUNGSI UTAMA ORKESTRASI ---
 async function main() {
-  console.log(colors.bold.blue("Memulai Skrip AutoSwap Mandiri..."));
-  console.log(colors.gray(`Waktu saat ini: ${new Date().toLocaleString()}`));
-  await performContinuousSwaps();
-  console.log(colors.bold.green('\nSemua swap yang direncanakan untuk sesi ini telah selesai!'));
-  console.log(colors.gray(`Waktu selesai: ${new Date().toLocaleString()}`));
+  console.log(colors.bold.blue("===== Memulai Skrip Master Somnia (Mint & Swap) ====="));
+  console.log(colors.gray(`Waktu: ${new Date().toLocaleString()}`));
+
+  const signer = new ethers.Wallet(SINGLE_WALLET_PRIVATE_KEY, provider);
+  const walletAddress = await signer.getAddress();
+  console.log(`Menggunakan Wallet: ${walletAddress} [ID: ${WALLET_ID}]`.yellow);
+
+  // Inisialisasi tokensToManage (PONG dan PING)
+  const pongInfo = await getTokenInfo(CONTRACT_ADDRESSES.PONG, signer);
+  const pingInfo = await getTokenInfo(CONTRACT_ADDRESSES.PING, signer);
+  tokensToManage.push(pongInfo); // pongInfo sudah berisi address, symbol, decimals
+  tokensToManage.push(pingInfo);
+
+  try {
+    const nativeBalanceBN = await provider.getBalance(walletAddress);
+    console.log(`Saldo Native Awal (${CHAIN_CONFIG.SYMBOL}): ${ethers.utils.formatEther(nativeBalanceBN)}`.cyan);
+    if (nativeBalanceBN.lt(ethers.utils.parseEther("0.002"))) {
+        console.warn(`PERINGATAN: Saldo native rendah. Pastikan cukup untuk semua transaksi.`.yellow)
+    }
+  } catch (e) {
+    console.error(` Gagal mendapatkan saldo native: ${e.message}`.red); return; 
+  }
+
+  // 1. Jalankan Fase Minting
+  let mintingDoneSuccessfully = false;
+  try {
+    mintingDoneSuccessfully = await performMinting(signer, walletAddress);
+    if(mintingDoneSuccessfully) {
+        console.log(colors.green.bold("\n--- Fase Minting Selesai Sukses ---"));
+    } else {
+        console.log(colors.yellow.bold("\n--- Fase Minting Selesai (mungkin ada kegagalan, cek log) ---"));
+    }
+  } catch (error) {
+    console.error(colors.red.bold("\n❌ Error Kritis Fase Minting:"), error);
+  }
+
+  const midBreakSeconds = 5 + Math.random()*5;
+  console.log(`\n⏳ Jeda ${Math.round(midBreakSeconds)} detik sebelum fase swapping...`);
+  await new Promise(res => setTimeout(res, midBreakSeconds * 1000));
+
+  // 2. Jalankan Fase Swapping
+  try {
+    const balPong = await getTokenBalance(CONTRACT_ADDRESSES.PONG, walletAddress, signer);
+    const balPing = await getTokenBalance(CONTRACT_ADDRESSES.PING, walletAddress, signer);
+    console.log(`Memulai swap dengan saldo: ${balPong.symbol} ${balPong.formatted.toFixed(4)}, ${balPing.symbol} ${balPing.formatted.toFixed(4)}`.blue);
+    
+    if (balPong.formatted < 0.00001 && balPing.formatted < 0.00001 && !mintingDoneSuccessfully) {
+        console.log("Tidak ada token di-mint & saldo awal kosong. Swap tidak dilanjutkan.".yellow);
+    } else {
+        await performSwapping(signer, walletAddress);
+        console.log(colors.green.bold("\n--- Fase Swapping Selesai ---"));
+    }
+  } catch (error) {
+    console.error(colors.red.bold("\n❌ Error Kritis Fase Swapping:"), error);
+  }
+
+  console.log(colors.bold.blue("\n===== Skrip Master Somnia Selesai ====="));
+  console.log(colors.gray(`Waktu Selesai: ${new Date().toLocaleString()}`));
 }
 
-// Menjalankan fungsi main dan menangani error global
 main().catch(error => {
-  console.error("🛑 ERROR FATAL PADA FUNGSI main LUAR:".red);
-  if (error.reason) console.error(`   Reason: ${error.reason}`.red);
-  if (error.code) console.error(`   Code: ${error.code}`.red);
-  if (error.message) console.error(`   Message: ${error.message}`.red);
-  else console.error(error);
+  console.error(colors.red.bold("🛑 ERROR FATAL GLOBAL:"), error);
   process.exit(1);
 });
