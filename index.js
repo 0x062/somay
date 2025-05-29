@@ -371,7 +371,7 @@ async function main() {
   tokensToManage.push(pongInfo); // pongInfo sudah berisi address, symbol, decimals
   tokensToManage.push(pingInfo);
 
-  try {
+  /*try {
     const nativeBalanceBN = await provider.getBalance(walletAddress);
     console.log(`Saldo Native Awal (${CHAIN_CONFIG.SYMBOL}): ${ethers.utils.formatEther(nativeBalanceBN)}`.cyan);
     if (nativeBalanceBN.lt(ethers.utils.parseEther("0.002"))) {
@@ -392,8 +392,7 @@ async function main() {
   const faucetDelaySeconds = 3 + Math.random()*3; // Jeda 3-6 detik
   console.log(`\n⏳ Jeda ${Math.round(faucetDelaySeconds)} detik setelah klaim faucet...`.gray);
   await new Promise(res => setTimeout(res, faucetDelaySeconds * 1000));
-
-  // ... (lanjutkan dengan langkah Fase Minting, Jeda, Fase Swapping seperti sebelumnya) ...
+  */
 
   // 1. Jalankan Fase Minting
   let mintingDoneSuccessfully = false;
