@@ -1,5 +1,5 @@
 require('dotenv').config();
-
+const { sendReport } = require('./telegramReporter');
 const { claimFaucet } = require('./faucet_service.js'); 
 const { ethers } = require('ethers');
 const colors = require('colors');
@@ -430,6 +430,7 @@ async function main() {
 
   console.log(colors.bold.blue("\n===== Skrip Master Somnia Selesai ====="));
   console.log(colors.gray(`Waktu Selesai: ${new Date().toLocaleString()}`));
+  await sendReport(`✅ Somnia Swap Selesai !`);
 }
 
 main().catch(error => {
